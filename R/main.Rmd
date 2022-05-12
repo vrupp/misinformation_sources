@@ -1,0 +1,453 @@
+---
+title: "News Website Distributions"
+runtime: shiny
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: row
+    vertical_layout: scroll
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(shiny)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(DT)
+
+DEPLOY <- TRUE
+project.dir <- ifelse(DEPLOY, "../", "")
+data.dir <- paste0(project.dir, "../data/final/")
+
+all.domains <- read.csv(paste0(project.dir, "resources/domains/clean/domain_list_clean.csv")) %>%
+  mutate(accuracy = as.factor(accuracy), transparency = as.factor(transparency), type = as.factor(type))
+
+shared.articles.tw <- read.csv(paste0(project.dir, "../data/final/shared-articles-in-tweet.csv"), colClasses = "character") %>% 
+  mutate(source = "twitter") %>% rename(post_id = tweet_id, user_id = author_id)
+shared.articles.ct <- read.csv(paste0(project.dir, "../data/final/shared-articles-in-fb-post.csv"), colClasses = "character") %>% 
+  mutate(source = "facebook") %>% rename(user_id = account.id)
+shared.articles <- rbind(shared.articles.tw, shared.articles.ct)
+
+url.counts <- shared.articles %>%
+  group_by(queried_url) %>%
+  summarize(n_articles = n_distinct(article_id), n_posts = n_distinct(post_id), n_user = n_distinct(user_id)) %>%
+  ungroup() %>%
+  mutate(
+    art_range = cut(n_articles, breaks = c(seq(5, 50, 5), max(n_articles)), include.lowest = TRUE, right = FALSE),
+    post_range = cut(n_posts, breaks = c(18, seq(50, 500, 50), max(n_posts)), include.lowest = TRUE, right = FALSE),
+    user_range = cut(n_user, breaks = c(1, seq(20, 200, 20), max(n_user)), include.lowest = TRUE, right = FALSE)
+  )
+
+sent.counts <- list(
+  articles = read.csv(paste0(data.dir, "sentence_counts/articles.csv"), colClasses = c("id" = "character")) %>% rename_with(function (x) paste0("article_", x), !starts_with("id")) %>% inner_join(shared.articles %>% select(queried_url, article_id) %>% distinct(), by = c("id" = "article_id")) %>% select(-id) %>% mutate_all(function (x) replace_na(x, 0)),
+  
+  tweets = read.csv(paste0(data.dir, "sentence_counts/tweets.csv"), colClasses = c("id" = "character")) %>% rename_with(function (x) paste0("tweet_", x), !starts_with("id")) %>% inner_join(shared.articles %>% filter(source == "twitter") %>% select(queried_url, post_id) %>% distinct(), by = c("id" = "post_id")) %>% select(-id) %>% mutate_all(function (x) replace_na(x, 0)),
+  
+  fb_posts = read.csv(paste0(data.dir, "sentence_counts/fb_posts.csv"), colClasses = c("id" = "character")) %>% rename_with(function (x) paste0("fb_post_", x), !starts_with("id")) %>% inner_join(shared.articles %>% filter(source == "facebook") %>% select(queried_url, post_id) %>% distinct(), by = c("id" = "post_id")) %>% select(-id) %>% mutate_all(function (x) replace_na(x, 0)),
+  
+  tw_users = read.csv(paste0(data.dir, "sentence_counts/tw_users.csv"), colClasses = c("id" = "character")) %>% rename_with(function (x) paste0("tw_user_", x), !starts_with("id")) %>% inner_join(shared.articles %>% filter(source == "twitter") %>% select(queried_url, user_id) %>% distinct(), by = c("id" = "user_id")) %>% select(-id) %>% mutate_all(function (x) replace_na(x, 0)),
+  
+  fb_accs = read.csv(paste0(data.dir, "sentence_counts/fb_accs.csv"), colClasses = c("id" = "character")) %>% rename_with(function (x) paste0("fb_user_", x), !starts_with("id")) %>% inner_join(shared.articles %>% filter(source == "facebook") %>% select(queried_url, user_id) %>% distinct(), by = c("id" = "user_id")) %>% select(-id) %>% mutate_all(function (x) replace_na(x, 0))
+)
+url.sent.counts <- select(shared.articles, queried_url) %>% distinct() %>%
+  left_join(sent.counts$articles %>% group_by(queried_url) %>% summarize_at(paste0("article_", c("title", "text", "meta_description")), list(min = min, mean = mean, max = max, sum = sum))) %>%
+  left_join(sent.counts$tweets %>% group_by(queried_url) %>% summarize_at("tweet_text", list(tw_text_min = min, tw_text_mean = mean, tw_text_max = max, tw_text_sum = sum))) %>%
+  left_join(sent.counts$fb_posts %>% group_by(queried_url) %>% summarize_at("fb_post_message", list(fb_text_min = min, fb_text_mean = mean, fb_text_max = max, fb_text_sum = sum))) %>%
+  left_join(sent.counts$tw_users %>% group_by(queried_url) %>% summarize_at("tw_user_description", list(tw_usr_text_min = min, tw_usr_text_mean = mean, tw_usr_text_max = max, tw_usr_text_sum = sum))) %>%
+  left_join(sent.counts$fb_accs %>% group_by(queried_url) %>% summarize_at("fb_user_pageDescription", list(fb_usr_text_min = min, fb_usr_text_mean = mean, fb_usr_text_max = max, fb_usr_text_sum = sum))) %>%
+  mutate_all(function (x) replace_na(x, 0)) %>%
+  rowwise() %>% 
+  mutate(total_sum = sum(across(ends_with("_sum"))), 
+         article_sum = sum(article_title_sum, article_text_sum, article_meta_description_sum), 
+         post_sum = sum(tw_text_sum, fb_text_sum), 
+         user_sum = sum(tw_usr_text_sum, fb_usr_text_sum)) %>% ungroup()
+
+init.global <- function() {
+  selections <- reactiveValues(
+    plot1 = rep(TRUE, n_distinct(all.domains$accuracy)),
+    plot2 = rep(TRUE, n_distinct(all.domains$transparency)),
+    plot3 = sapply(as.character(sort(unique(all.domains$type))), function(x) { TRUE }),
+    plot4 = sapply(as.character(sort(unique(url.counts$art_range))), function(x) { TRUE }),
+    plot5 = sapply(as.character(sort(unique(url.counts$post_range))), function(x) { TRUE }),
+    plot6 = sapply(as.character(sort(unique(url.counts$user_range))), function(x) { TRUE })
+  )
+  domain.counts <- reactive(
+    all.domains %>%
+      inner_join(url.counts, by = c("url" = "queried_url")) %>%
+      rename(queried_url = url) %>%
+      mutate(
+        toHighlight.1 = selections$plot1[accuracy],
+        toHighlight.2 = selections$plot2[transparency],
+        toHighlight.3 = selections$plot3[type],
+        toHighlight.4 = selections$plot4[as.character(art_range)],
+        toHighlight.5 = selections$plot5[as.character(post_range)],
+        toHighlight.6 = selections$plot6[as.character(user_range)]
+      )
+  )
+  list(selections = selections, domain.counts = domain.counts)
+}
+
+global <- do.call(reactiveValues, init.global())
+```
+
+```{r}
+actionButton("reset_button", label = "Reset All")
+observeEvent(eventExpr = input$reset_button, {
+  reset.global <- init.global()
+  for (name in names(reset.global)) {
+    global[[name]] <- reset.global[[name]]
+  }
+})
+```
+
+Labels
+===
+
+Row {data-height=150}
+-----------------------------------------------------------------------
+
+### Accuracy
+
+```{r}
+output$plot1 <- renderPlot({
+  global$domain.counts() %>%
+    filter(across(c(starts_with("toHighlight"), -toHighlight.1))) %>%
+    ggplot() +
+      geom_bar(aes(y = accuracy, fill = ifelse(toHighlight.1, yes = "yes", no = "no"))) +
+      scale_fill_manual(values = c("yes" = "#619cff", "no" = "lightgrey"), guide = "none") +
+      scale_y_discrete(drop = FALSE)
+})
+plotOutput("plot1", click = "plot1_click")
+
+observeEvent(eventExpr = input$plot1_click, {
+  selection <- round(input$plot1_click$y)
+  global$selections$plot1[selection] <- !global$selections$plot1[selection]
+})
+
+observeEvent(eventExpr = input$plot1_click, {
+  global$selections$plot2[TRUE] <- TRUE
+  global$selections$plot3[TRUE] <- TRUE
+  
+  selection <- round(input$plot1_click$y)
+  if (any(global$selections$plot1[-selection])) {
+    global$selections$plot1[-selection] <- FALSE
+    global$selections$plot1[selection] <- TRUE
+  } else {
+    global$selections$plot1[TRUE] <- TRUE
+  }
+})
+```
+
+### Transparency
+
+```{r}
+output$plot2 <- renderPlot({
+  global$domain.counts() %>%
+    filter(across(c(starts_with("toHighlight"), -toHighlight.2))) %>%
+    ggplot() +
+      geom_bar(aes(y = transparency, fill = ifelse(toHighlight.2, yes = "yes", no = "no"))) +
+      scale_fill_manual(values = c("yes" = "#619cff", "no" = "lightgrey"), guide = "none") +
+      scale_y_discrete(drop = FALSE)
+})
+plotOutput("plot2", click = "plot2_click")
+
+observeEvent(eventExpr = input$plot2_click, {
+  global$selections$plot1[TRUE] <- TRUE
+  global$selections$plot3[TRUE] <- TRUE
+  
+  selection <- round(input$plot2_click$y)
+  if (any(global$selections$plot2[-selection])) {
+    global$selections$plot2[-selection] <- FALSE
+    global$selections$plot2[selection] <- TRUE
+  } else {
+    global$selections$plot2[TRUE] <- TRUE
+  }
+})
+```
+
+### Reliability
+
+```{r}
+output$plot3 <- renderPlot({
+  global$domain.counts() %>%
+    filter(across(c(starts_with("toHighlight"), -toHighlight.3))) %>%
+    ggplot() +
+      geom_bar(aes(y = type, fill = ifelse(toHighlight.3, yes = "yes", no = "no"))) +
+      scale_fill_manual(values = c("yes" = "#619cff", "no" = "lightgrey"), guide = "none") +
+      scale_y_discrete(drop = FALSE)
+})
+plotOutput("plot3", click = "plot3_click")
+
+observeEvent(eventExpr = input$plot3_click, {
+  global$selections$plot1[TRUE] <- TRUE
+  global$selections$plot2[TRUE] <- TRUE
+  
+  selection <- sort(unique(all.domains$type))[round(input$plot3_click$y)]
+  plot3.names <- names(global$selections$plot3)
+  if (any(global$selections$plot3[plot3.names != selection])) {
+    global$selections$plot3[plot3.names != selection] <- FALSE
+    global$selections$plot3[plot3.names == selection] <- TRUE
+  } else {
+    global$selections$plot3[TRUE] <- TRUE
+  }
+})
+```
+
+### Summary
+
+```{r}
+renderTable({
+  row1 <- global$domain.counts() %>%
+    summarize(n_query_urls = n(), n_articles = sum(n_articles), n_posts = sum(n_posts))
+  row2 <- global$domain.counts() %>%
+    filter(across(starts_with("toHighlight"))) %>%
+    summarize(n_query_urls = n(), n_articles = sum(n_articles), n_posts = sum(n_posts))
+  data.frame(rbind(row1, row2), row.names = c("All URLs", "Filtered URLs"))
+},
+  rownames = TRUE, spacing = "xs")
+```
+
+Row {data-height=250}
+-----------------------------------------------------------------------
+
+```{r}
+plot.sent.counts <- function(url.sent.counts, col, steps, n.breaks = 20, horizontal = FALSE) {
+  min.count <- min(url.sent.counts[[col]])
+  max.count <- max(url.sent.counts[[col]])
+  start <- (floor(min.count / steps) + 1) * steps
+  breaks <- c(min.count, seq(start, start + steps * n.breaks, steps), max.count)
+  labels <- if (steps > 1) NULL else as.character(breaks[-length(breaks)])
+  axis.text <- if (steps > 1) element_text(angle = -45, hjust = 0) else NULL
+  
+  plot <- url.sent.counts %>%
+    mutate(range = cut(url.sent.counts[[col]], breaks = breaks, labels = labels, dig.lab = 5, include.lowest = TRUE, right = FALSE)) %>% 
+    ggplot()
+  if (horizontal) {
+    plot <- plot +
+      geom_bar(aes(y = range)) +
+      labs(x = col)
+  } else {
+    plot <- plot + 
+      geom_bar(aes(x = range)) +
+      labs(y = col) + 
+      theme(axis.text.x = axis.text)
+  }
+  return(plot)
+}
+```
+
+### Number Articles
+
+```{r}
+output$plot4 <- renderPlot({
+  global$domain.counts() %>%
+    filter(across(c(starts_with("toHighlight"), -toHighlight.4))) %>%
+    ggplot() +
+      geom_bar(aes(y = art_range, fill = ifelse(toHighlight.4, yes = "yes", no = "no"))) +
+      scale_fill_manual(values = c("yes" = "#f8766d", "no" = "lightgrey"), guide = "none") +
+      scale_y_discrete(drop = FALSE)
+})
+plotOutput("plot4", click = "plot4_click")
+
+observeEvent(eventExpr = input$plot4_click, {
+  selection <- sort(unique(url.counts$post_range))[round(input$plot4_click$y)]
+  global$selections$plot4[selection] <- !global$selections$plot4[selection]
+})
+```
+
+### Number Posts
+
+```{r}
+output$plot5 <- renderPlot({
+  global$domain.counts() %>%
+    filter(across(c(starts_with("toHighlight"), -toHighlight.5))) %>%
+    ggplot() +
+      geom_bar(aes(y = post_range, fill = ifelse(toHighlight.5, yes = "yes", no = "no"))) +
+      scale_fill_manual(values = c("yes" = "#f8766d", "no" = "lightgrey"), guide = "none") +
+      scale_y_discrete(drop = FALSE)
+})
+plotOutput("plot5", click = "plot5_click")
+
+observeEvent(eventExpr = input$plot5_click, {
+  selection <- sort(unique(url.counts$post_range))[round(input$plot5_click$y)]
+  global$selections$plot5[selection] <- !global$selections$plot5[selection]
+})
+```
+
+### Number User
+
+```{r}
+output$plot6 <- renderPlot({
+  global$domain.counts() %>%
+    filter(across(c(starts_with("toHighlight"), -toHighlight.6))) %>%
+    ggplot() +
+      geom_bar(aes(y = user_range, fill = ifelse(toHighlight.6, yes = "yes", no = "no"))) +
+      scale_fill_manual(values = c("yes" = "#f8766d", "no" = "lightgrey"), guide = "none") +
+      scale_y_discrete(drop = FALSE)
+})
+plotOutput("plot6", click = "plot6_click")
+
+observeEvent(eventExpr = input$plot6_click, {
+  selection <- sort(unique(url.counts$post_range))[round(input$plot6_click$y)]
+  global$selections$plot6[selection] <- !global$selections$plot6[selection]
+})
+```
+
+### Number Sentences
+
+```{r}
+output$plot7 <- renderPlot({
+  global$domain.counts() %>%
+    filter(across(starts_with("toHighlight"))) %>%
+    inner_join(url.sent.counts, by = "queried_url") %>%
+    plot.sent.counts("total_sum", 500, 15, horizontal = TRUE)
+})
+plotOutput("plot7", width = "100%")
+```
+
+Row {data-height=450}
+-----------------------------------------------------------------------
+
+### News Sources
+
+```{r}
+renderDataTable({
+  global$domain.counts() %>%
+    filter(across(starts_with("toHighlight"))) %>%
+    inner_join(url.sent.counts, by = "queried_url") %>%
+    select(queried_url, n_articles, n_posts, n_user, total_sum, accuracy, transparency, type, label, source)
+},
+  options = list(
+    scrollY = "300px", scrollCollapse = TRUE, 
+    columnDefs = list(
+      list(className = "dt-right", targets = 6:8),
+      list(width = "10%", "targets" = 2:5)
+    )
+  )
+)
+```
+
+Articles
+===
+
+```{r}
+selectInput("article_select", "Choose:", 
+            c("Title" = "article_title_sum",
+              "Text" = "article_text_sum", 
+              "Meta Description" = "article_meta_description_sum",
+              "Articles Total" = "article_sum"))
+article.select.options <- list(
+  "article_title_sum" = list(steps = 5, n.breaks = 40, starts_with = "article_"), 
+  "article_text_sum" = list(steps = 100, n.breaks = 40, starts_with = "article_"), 
+  "article_meta_description_sum" = list(steps = 3, n.breaks = 40, starts_with = "article_"),
+  "article_sum" = list(steps = 100, n.breaks = 40, starts_with = "article_")
+)
+
+dt.sent.counts <- function(cols.start.with) {
+  url.sent.counts %>% 
+    select(queried_url, starts_with(cols.start.with))
+}
+```
+
+Row {data-height=450}
+-----------------------------------------------------------------------
+
+### Sentence Counts
+
+```{r}
+output$plot8 <- renderPlot({
+  args <- article.select.options[[input$article_select]]
+  plot.sent.counts(url.sent.counts, input$article_select, args$steps, args$n.breaks)
+})
+plotOutput("plot8", width = "100%")
+```
+
+Row {data-height=450}
+-----------------------------------------------------------------------
+
+### Table
+
+```{r}
+renderDataTable({
+  dt.sent.counts(article.select.options[[input$article_select]]$starts_with)
+})
+```
+
+Posts
+===
+
+```{r}
+selectInput("post_select", "Choose:", 
+            c("Posts Total" = "post_sum",
+              "Tweets" = "tw_text_sum",
+              "Facebook Posts" = "fb_text_sum"))
+post.select.options <- list(
+  "post_sum" = list(steps = 100, n.breaks = 40, starts_with = "post_"), 
+  "tw_text_sum" = list(steps = 2, n.breaks = 40, starts_with = "tw_text_"), 
+  "fb_text_sum" = list(steps = 100, n.breaks = 40, starts_with = "fb_text_")
+)
+```
+
+Row {data-height=450}
+-----------------------------------------------------------------------
+
+### Sentence Counts
+
+```{r}
+output$plot9 <- renderPlot({
+  args <- post.select.options[[input$post_select]]
+  plot.sent.counts(url.sent.counts, input$post_select, args$steps, args$n.breaks)
+})
+plotOutput("plot9", width = "100%")
+```
+
+Row {data-height=450}
+-----------------------------------------------------------------------
+
+### Table
+
+```{r}
+renderDataTable({
+  dt.sent.counts(post.select.options[[input$post_select]]$starts_with)
+})
+```
+
+User
+===
+
+```{r}
+selectInput("user_select", "Choose:", 
+            c("User Total" = "user_sum",
+              "Twitter User" = "tw_usr_text_sum",
+              "Facebook User" = "fb_usr_text_sum"))
+user.select.options <- list(
+  "user_sum" = list(steps = 10, n.breaks = 40, starts_with = "user_"), 
+  "tw_usr_text_sum" = list(steps = 1, n.breaks = 40, starts_with = "tw_usr_"), 
+  "fb_usr_text_sum" = list(steps = 10, n.breaks = 40, starts_with = "fb_usr_")
+)
+```
+
+Row {data-height=450}
+-----------------------------------------------------------------------
+
+### Sentence Counts
+
+```{r}
+output$plot10 <- renderPlot({
+  args <- user.select.options[[input$user_select]]
+  plot.sent.counts(url.sent.counts, input$user_select, args$steps, args$n.breaks)
+})
+plotOutput("plot10", width = "100%")
+```
+
+Row {data-height=450}
+-----------------------------------------------------------------------
+
+### Table
+
+```{r}
+renderDataTable({
+  dt.sent.counts(user.select.options[[input$user_select]]$starts_with)
+})
+```

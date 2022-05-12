@@ -1,0 +1,321 @@
+---
+title: "Statistical Tests"
+author: "Valentin Rupprecht"
+date: "14 3 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(boot)
+library(stringr)
+
+DEPLOY <- TRUE
+project.dir <- ifelse(DEPLOY, "../", "")
+windowsFonts(Roboto = windowsFont("Roboto Medium"))
+```
+
+```{r}
+accuracy <- function(y.pred, i = NULL, boot.call = FALSE) {
+  if (is.null(i)) {
+    i <- 1:length(y.pred)
+  }
+  y.true.tmp <- if (boot.call) y.true[i] else y.true
+  
+  return(sum(y.pred[i] == y.true.tmp) / length(y.pred))
+}
+precision <- function(y.pred, i = NULL, cls = NULL, boot.call = FALSE) {
+  if (is.null(i)) {
+    i <- 1:length(y.pred)
+  }
+  if (is.null(cls)) {
+    cls <- as.character(unique(y.true))
+  }
+  y.true.tmp <- if (boot.call) y.true[i] else y.true
+  
+  cm <- as.matrix(table(Actual = y.true.tmp, Predicted = y.pred[i]))
+  colsums <- apply(cm, 2, sum) # number of predictions per class
+  return((diag(cm) / colsums)[cls])
+}
+recall <- function(y.pred, i = NULL, cls = NULL, boot.call = FALSE) {
+  if (is.null(i)) {
+    i <- 1:length(y.pred)
+  }
+  if (is.null(cls)) {
+    cls <- as.character(unique(y.true))
+  }
+  y.true.tmp <- if (boot.call) y.true[i] else y.true
+  
+  cm <- as.matrix(table(Actual = y.true.tmp, Predicted = y.pred[i]))
+  rowsums <- apply(cm, 1, sum) # number of instances per class
+  return((diag(cm) / rowsums)[cls])
+}
+f1.score <- function(y.pred, i = NULL, cls = NULL, boot.call = FALSE) {
+  prec <- precision(y.pred, i = i, cls = cls, boot.call = boot.call)
+  rec <- recall(y.pred, i = i, cls = cls, boot.call = boot.call)
+  f1 <- 2 * prec * rec / (prec + rec)
+  
+  if (is.null(cls)) {
+    cls <- as.character(unique(y.true))
+  }
+  return(f1[cls])
+}
+macro.f1 <- function(y.pred, i = NULL, boot.call = FALSE) {
+  return(mean(f1.score(y.pred, i = i, boot.call = boot.call)))
+}
+metric.table <- function(y.preds) {
+  return(data.frame(
+    accuracy = sapply(y.preds, accuracy), 
+    macro.f1 = sapply(y.preds, macro.f1),
+    precision =  matrix(sapply(y.preds, precision), ncol = 2, byrow = TRUE, dimnames = list(paste0("pred", 1:length(y.preds)), c("precision.0", "precision.1"))),
+    recall = matrix(sapply(y.preds, recall), ncol = 2, byrow = TRUE, dimnames = list(paste0("pred", 1:length(y.preds)), c("recall.0", "recall.1")))
+  ))
+}
+```
+
+# McNemar Test between two best models
+Pred1 showed slightly better performance than pred2 regarding precision of "1" (inaccurate) and recall of "0" (accurate). However, contingency table and p-value show that the performance increase is not due to different predictions, but rather random.
+```{r}
+# pred1 is bit better than pred2
+pred1 <- read.csv(paste0(project.dir, "../data/train_checkpoints/Adam-psm-out/003/pred-test.csv"))
+pred2 <- read.csv(paste0(project.dir, "../data/train_checkpoints/Adam-psm-out/006/pred-test.csv"))
+y.true <- pred1$accuracy_bin_true
+print(metric.table(list(pred1$accuracy_bin_pred, pred2$accuracy_bin_pred)))
+
+correct1 <- pred1$accuracy_bin_pred == y.true
+correct2 <- pred2$accuracy_bin_pred == y.true
+contingency <- function(correct1, correct2) {
+  as.matrix(as.data.frame(list(
+    "Classifier 2 Correct" = c(
+      "Classifier 1 Correct" = sum(correct1 & correct2),
+      "Classifier 1 Incorrect" = sum(!correct1 & correct2)
+    ), 
+    "Classifier 2 Incorrect" = c(
+      "Classifier 1 Correct" = sum(correct1 & !correct2),
+      "Classifier 1 Incorrect" = sum(!correct1 & !correct2)
+    )
+  )))
+}
+contingency(correct1, correct2)
+```
+
+```{r}
+mcnemar.test(contingency(correct1, correct2))
+```
+
+# McNemar Test between one and random model
+Pred1 is compared to random model (predicting 0 and 1 with equal probability). 
+```{r}
+set.seed(19)
+pred.rand1 <- floor(runif(nrow(pred1), max = 2))
+
+majority.class <- names(which.max(table(y.true)))
+pred.rand2 <- rep(majority.class, length(y.true))
+
+print(metric.table(list(pred1$accuracy_bin_pred, pred.rand1, pred.rand2)))
+
+correct.rand1 <- pred.rand1 == y.true
+correct.rand2 <- pred.rand2 == y.true
+print(contingency(correct1, correct.rand1))
+print(contingency(correct1, correct.rand2))
+```
+
+```{r}
+mcnemar.test(contingency(correct1, correct.rand1))
+mcnemar.test(contingency(correct1, correct.rand2))
+```
+
+# Permutation Tests
+```{r}
+perm.test <- function(orig.data, f, ..., R = 20000) {
+  #' Permutation test for hypothesis testing
+  #' 
+  #' @param orig.data Data to sample from
+  #' @param f Function to apply on each permutation sample
+  #' @param ... Additional parameters for f
+  #' @param R Number of permutation samples
+  #' 
+  #' @return T values of samples
+  set.seed(19)
+  res <- boot(orig.data, f, R = R, sim = "permutation", ...)
+
+  return(list(t0 = f(orig.data, ...), t = res$t))
+}
+
+p.value <- function(t.perm, t.orig) {
+  return((sum(t.perm >= t.orig) + 1) / length(t.perm))
+}
+
+acc.perm <- perm.test(pred1$accuracy_bin_pred, f = accuracy, R = 20000)
+prec.perm <- perm.test(pred1$accuracy_bin_pred, f = precision, R = 20000)
+rec.perm <- perm.test(pred1$accuracy_bin_pred, f = recall, R = 20000)
+f1.perm <- perm.test(pred1$accuracy_bin_pred, f = f1.score, R = 20000)
+macrof1.perm <- perm.test(pred1$accuracy_bin_pred, f = macro.f1, R = 20000)
+c(
+  "Accuracy" = p.value(acc.perm$t, acc.perm$t0), 
+  "Precision (accurate)" = p.value(prec.perm$t[,1], prec.perm$t0[1]),
+  "Precision (inaccurate)" = p.value(prec.perm$t[,2], prec.perm$t0[2]),
+  "Recall (accurate)" = p.value(rec.perm$t[,1], rec.perm$t0[1]),
+  "Recall (accurate)" = p.value(rec.perm$t[,2], rec.perm$t0[2]),
+  "F1 (accurate)" = p.value(f1.perm$t[,1], f1.perm$t0[1]),
+  "F1 (accurate)" = p.value(f1.perm$t[,2], f1.perm$t0[2]),
+  "Macro F1" = p.value(macrof1.perm$t, macrof1.perm$t0)
+)
+```
+
+```{r}
+acc.perm2 <- perm.test(pred2$accuracy_bin_pred, f = accuracy, R = 20000)
+prec.perm2 <- perm.test(pred2$accuracy_bin_pred, f = precision, R = 20000)
+rec.perm2 <- perm.test(pred2$accuracy_bin_pred, f = recall, R = 20000)
+f1.perm2 <- perm.test(pred2$accuracy_bin_pred, f = f1.score, R = 20000)
+macrof1.perm2 <- perm.test(pred2$accuracy_bin_pred, f = macro.f1, R = 20000)
+c(
+  "Accuracy" = p.value(acc.perm2$t, acc.perm2$t0), 
+  "Precision (accurate)" = p.value(prec.perm2$t[,1], prec.perm2$t0[1]),
+  "Precision (inaccurate)" = p.value(prec.perm2$t[,2], prec.perm2$t0[2]), 
+  "Recall (accurate)" = p.value(rec.perm2$t[,1], rec.perm2$t0[1]),
+  "Recall (accurate)" = p.value(rec.perm2$t[,2], rec.perm2$t0[2]),
+  "F1 (accurate)" = p.value(f1.perm2$t[,1], f1.perm2$t0[1]),
+  "F1 (accurate)" = p.value(f1.perm2$t[,2], f1.perm2$t0[2]),
+  "Macro F1" = p.value(macrof1.perm2$t, macrof1.perm2$t0)
+)
+```
+
+```{r}
+perm.histo <- function(perm, x.axis, i = NULL) {
+  (if (is.null(i)) data.frame(perm) else data.frame(t0 = perm$t0[i], t = perm$t[,i])) %>%
+    ggplot() + 
+      geom_histogram(aes(x = t), bins = 25) +
+      geom_vline(aes(xintercept = t0), color = "red") +
+      labs(x = x.axis) +
+      theme(text = element_text(size = 14))
+}
+
+acc.histo <- perm.histo(acc.perm, "accuracy")
+f1.histo <- perm.histo(macrof1.perm, "macro F1")
+prec.histo <- list(perm.histo(prec.perm, "precision (lbl: 'accurate')", 1), perm.histo(prec.perm, "precision (lbl: 'inaccurate')", 2))
+rec.histo <- list(perm.histo(rec.perm, "recall (lbl: 'accurate')", 1), perm.histo(rec.perm, "recall (lbl: 'inaccurate')", 2))
+
+ggsave("accuracy-perm-histo.pdf", acc.histo, device = "pdf", path = paste0(project.dir, "plots"), height = 8, units = "cm")
+ggsave("macro-f1-perm-histo.pdf", f1.histo, device = "pdf", path = paste0(project.dir, "plots"), height = 8, units = "cm")
+ggsave("precision1-perm-histo.pdf", prec.histo[[1]], device = "pdf", path = paste0(project.dir, "plots"), height = 8, units = "cm")
+ggsave("precision2-perm-histo.pdf", prec.histo[[2]], device = "pdf", path = paste0(project.dir, "plots"), height = 8, units = "cm")
+ggsave("recall1-perm-histo.pdf", rec.histo[[1]], device = "pdf", path = paste0(project.dir, "plots"), height = 8, units = "cm")
+ggsave("recall2-perm-histo.pdf", rec.histo[[2]], device = "pdf", path = paste0(project.dir, "plots"), height = 8, units = "cm")
+
+acc.histo
+f1.histo
+prec.histo
+rec.histo
+```
+
+# Bootstrap CI
+```{r}
+bootstrap <- function(orig.data, f, ..., R = 9999) {
+  #' Estimate confidence interval from bootstrap samples.
+  #' 
+  #' @param orig.data Data to sample from
+  #' @param f Function to apply on each bootstrap sample
+  #' @param ... Additional parameter for f
+  #' @param R Number of bootstrap samples
+  #' 
+  #' @return Dataframe containing the bootstrap estimates and confidence interval
+  set.seed(19)
+  res <- boot(orig.data, f, R = R, ...)
+  return(res)
+}
+bootstrap.ci <- function(res) {
+  yhat <- t(sapply(1:length(res$t0), function(i) {
+    out <- boot.ci(res, index = i, type = c("perc"))
+    with(out, c(boot.estimate = t0, boot.ci.lower = percent[4], boot.ci.upper = percent[5]))
+  }))
+  return(yhat)
+}
+
+boot.res <- bootstrap(pred1$accuracy_bin_pred, f = (function(x, i) c(accuracy(x, i, boot.call = TRUE), macro.f1(x, i, boot.call = TRUE), precision(x, i, boot.call = TRUE), recall(x, i, boot.call = TRUE))), R = 9999)
+boot.cis <- as.data.frame(bootstrap.ci(boot.res))
+boot.cis$metric <- c("accuracy", "macro F1", "precision\n(lbl: 'accurate')", "precision\n(lbl: 'inaccurate')", "recall\n(lbl: 'accurate')", "recall\n(lbl: 'inaccurate')")
+boot.cis
+```
+
+```{r}
+boot.t <- data.frame(boot.res$t)
+colnames(boot.t) <- boot.cis$metric
+ci.plot <- boot.t %>%
+  pivot_longer(everything(), names_to = "metric") %>% 
+  mutate(metric = factor(metric, levels = boot.cis$metric[c(6, 4, 5, 3:1)])) %>%
+  ggplot(aes(y = metric)) +
+    geom_violin(aes(x = value)) +
+    geom_errorbar(aes(xmin = boot.ci.lower, xmax = boot.ci.upper), width = 0.4, size = 1, data = boot.cis) +
+  geom_point(aes(x = boot.estimate), color = "red", size = 2, data = boot.cis) +
+  labs(x = "Estimate", y = "Metric") +
+  theme(text = element_text(size = 14))
+ggsave("bootstrap-CIs.pdf", ci.plot, device = "pdf", path = paste0(project.dir, "plots"), height = 10, units = "cm")
+ci.plot
+```
+
+
+# CV
+```{r}
+pred.cv <- read.csv(paste0(project.dir, "../data/train_checkpoints/cv-bin-oversampling/pred-all.csv"))
+y.true <- pred.cv$accuracy_bin_true
+cv.pred <- metric.table(list(pred.cv$accuracy_bin_pred)) %>%
+  mutate(type = "all", precision.0 = precision.precision.0, precision.1 = precision.precision.1, recall.0 = recall.recall.0, recall.1 = recall.recall.1) %>%
+  select(type, accuracy, macro.f1, precision.0, precision.1, recall.0, recall.1) %>%
+  pivot_longer(-type, names_to = "metric")
+```
+
+```{r}
+cv.plot <- read.csv(paste0(project.dir, "../data/train_checkpoints/cv-bin-oversampling/scores-test.csv")) %>%
+  mutate(type = "single", accuracy = total.accuracy, macro.f1 = total.macro.f1, precision.0 = accurate.precision, precision.1 = inaccurate.precision, recall.0 = accurate.recall, recall.1 = inaccurate.recall) %>%
+  select(type, accuracy, macro.f1, precision.0, precision.1, recall.0, recall.1) %>%
+  pivot_longer(-type, names_to = "metric") %>%
+  rbind(cv.pred) %>%
+  mutate(metric = factor(recode(metric, accuracy = "accuracy", macro.f1 = "macro F1", precision.0 = "precision\n(lbl: accurate)", precision.1 = "precision\n(lbl: inaccurate)", recall.0 = "recall\n(lbl: accurate)", recall.1 = "recall\n(lbl: inaccurate)"), levels = c("recall\n(lbl: inaccurate)", "precision\n(lbl: inaccurate)", "recall\n(lbl: accurate)", "precision\n(lbl: accurate)", "macro F1", "accuracy"))) %>% 
+  ggplot(aes(y = metric)) +
+    geom_point(aes(x = value, color = metric, shape = type, stroke = if_else(type == "all", 2, 1), size = type == "all"), position = position_jitter(h = 0.1, seed = 19)) +
+    geom_text(aes(x = value, label = if_else(type == "all", round(value, 3), NULL)), vjust = -1, position = position_jitter(h = 0.1, seed = 19), size = 4) +#, family = "Roboto") +
+    scale_shape_manual(values = c(4, 16)) +
+    scale_size_manual(values = c(3, 5)) +
+    scale_color_brewer(palette = "Set1") +
+    guides(color = "none", size = "none", shape = guide_legend(override.aes = list(size = 5))) +
+    labs(x = "Estimate", y = "Metric", shape = "CV Fold") +
+    theme(text = element_text(size = 14))
+ggsave("cv-metrics.png", cv.plot + labs(title = "10-fold CV on binary accuracy label", caption = "Simplified task: Transform 5-point accuracy to binary label.\n1, 2, 3 -> 'inaccurate'.\n4, 5 -> 'accurate'") + theme(text = element_text(family = "Roboto", size = 20)), device = "png", path = paste0(project.dir, "plots"), width = 26.7, height = 15, units = "cm", dpi = 600)
+ggsave("cv-metrics.pdf", cv.plot, device = "pdf", path = paste0(project.dir, "plots"), height = 10, units = "cm")
+cv.plot
+```
+
+```{r}
+acc.perm <- perm.test(pred.cv$accuracy_bin_pred, f = accuracy, R = 20000)
+prec.perm <- perm.test(pred.cv$accuracy_bin_pred, f = precision, R = 20000)
+rec.perm <- perm.test(pred.cv$accuracy_bin_pred, f = recall, R = 20000)
+f1.perm <- perm.test(pred.cv$accuracy_bin_pred, f = macro.f1, R = 20000)
+print(c(
+  "Accuracy" = p.value(acc.perm$t, acc.perm$t0), 
+  "Precision (accurate)" = p.value(prec.perm$t[,1], prec.perm$t0[1]),
+  "Precision (inaccurate)" = p.value(prec.perm$t[,2], prec.perm$t0[2]), 
+  "Recall (accurate)" = p.value(rec.perm$t[,1], rec.perm$t0[1]),
+  "Recall (accurate)" = p.value(rec.perm$t[,2], rec.perm$t0[2]),
+  "Macro F1" = p.value(f1.perm$t, macrof1.perm$t0)
+))
+
+acc.histo <- perm.histo(acc.perm, "accuracy")
+f1.histo <- perm.histo(f1.perm, "macro F1")
+prec.histo <- list(perm.histo(prec.perm, "precision (lbl: 'accurate')", 1), perm.histo(prec.perm, "precision (lbl: 'inaccurate')", 2))
+rec.histo <- list(perm.histo(rec.perm, "recall (lbl: 'accurate')", 1), perm.histo(rec.perm, "recall (lbl: 'inaccurate')", 2))
+
+ggsave("cv-accuracy-perm-histo.pdf", acc.histo, device = "pdf", path = paste0(project.dir, "plots"), height = 8, units = "cm")
+ggsave("cv-macro-f1-perm-histo.pdf", f1.histo, device = "pdf", path = paste0(project.dir, "plots"), height = 8, units = "cm")
+ggsave("cv-precision1-perm-histo.pdf", prec.histo[[1]], device = "pdf", path = paste0(project.dir, "plots"), height = 8, units = "cm")
+ggsave("cv-precision2-perm-histo.pdf", prec.histo[[2]], device = "pdf", path = paste0(project.dir, "plots"), height = 8, units = "cm")
+ggsave("cv-recall1-perm-histo.pdf", rec.histo[[1]], device = "pdf", path = paste0(project.dir, "plots"), height = 8, units = "cm")
+ggsave("cv-recall2-perm-histo.pdf", rec.histo[[2]], device = "pdf", path = paste0(project.dir, "plots"), height = 8, units = "cm")
+
+acc.histo
+f1.histo
+prec.histo
+rec.histo
+```

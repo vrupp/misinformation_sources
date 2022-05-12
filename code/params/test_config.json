@@ -1,0 +1,10 @@
+{
+    "start_time": "2021-05-05T00:00:00Z",
+    "end_time": "2021-05-12T00:00:00Z",
+    "query": "covid",
+    "max_results": 5,
+    "tweet_fields": "context_annotations,created_at",
+    "user_fields": "created_at",
+    "place_fields": "contained_within,country,country_code,full_name,geo,id,name,place_type",
+    "expansions": "author_id,geo.place_id"
+  }

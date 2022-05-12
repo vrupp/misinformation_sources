@@ -1,0 +1,14 @@
+twitter_API.txt
+api-keys/
+code/params/proxy.json
+
+__pycache__/
+.ipynb_checkpoints/
+.venv
+.venv-36
+.vscode
+
+.Rproj.user
+
+data/
+resources/domains/raw/newsguard_2021-09-30.csv

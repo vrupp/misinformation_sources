@@ -1,0 +1,7 @@
+{
+    "query": "lang:en -is:retweet",
+    "tweet.fields": "id,text,author_id,context_annotations,conversation_id,created_at,entities,geo,possibly_sensitive,public_metrics,referenced_tweets",
+    "expansions": "author_id,geo.place_id",
+    "user.fields": "id,name,username,created_at,description,location,public_metrics,verified",
+    "place.fields": "full_name,id,contained_within,country,country_code,geo,name,place_type"
+}

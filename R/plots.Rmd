@@ -1,0 +1,108 @@
+---
+title: "Thesis Plots"
+author: "Valentin Rupprecht"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(DT)
+
+DEPLOY <- TRUE
+project.dir <- ifelse(DEPLOY, "../", "")
+final.dir <- paste0(project.dir, "../data/final/")
+
+all.domains <- read.csv(paste0(project.dir, "resources/domains/clean/domain_list_clean.csv")) %>%
+  mutate(accuracy = as.factor(accuracy), transparency = as.factor(transparency), type = as.factor(type))
+
+shared.urls.tw <- read.csv(paste0(project.dir, "../data/twitter/preproc/shared-url-in-tweet.csv.gzip"), colClasses = "character") %>%
+  mutate(source = "twitter") %>% rename(post_id = tweet_id)
+shared.urls.ct <- do.call(rbind, lapply(dir(paste0(project.dir, "../data/ct/preproc/shared-url-in-post"), pattern = "*.csv", full.names = TRUE), read.csv, colClasses = "character")) %>%
+  mutate(source = "facebook")
+shared.urls <- rbind(shared.urls.tw, shared.urls.ct)
+rm(shared.urls.tw, shared.urls.ct)
+
+shared.articles.tw <- read.csv(paste0(final.dir, "shared-articles-in-tweet.csv"), colClasses = "character") %>% 
+  mutate(source = "twitter") %>% rename(post_id = tweet_id, user_id = author_id)
+shared.articles.ct <- read.csv(paste0(final.dir, "shared-articles-in-fb-post.csv"), colClasses = "character") %>% 
+  mutate(source = "facebook") %>% rename(user_id = account.id)
+shared.articles <- rbind(shared.articles.tw, shared.articles.ct)
+rm(shared.articles.tw, shared.articles.ct)
+
+url.counts <- shared.articles %>%
+  group_by(queried_url) %>%
+  summarize(n_articles = n_distinct(article_id), n_posts = n_distinct(post_id), n_user = n_distinct(user_id)) %>%
+  ungroup() %>%
+  mutate(
+    art_range = cut(n_articles, breaks = c(seq(5, 50, 5), max(n_articles)), include.lowest = TRUE, right = FALSE),
+    post_range = cut(n_posts, breaks = c(18, seq(50, 500, 50), max(n_posts)), include.lowest = TRUE, right = FALSE),
+    user_range = cut(n_user, breaks = c(1, seq(20, 200, 20), max(n_user)), include.lowest = TRUE, right = FALSE)
+  )
+
+domain.counts <- all.domains %>% 
+  inner_join(url.counts, by = c("url" = "queried_url")) %>%
+  rename(queried_url = url)
+
+domain.status.counts <- all.domains %>%
+  anti_join(domain.counts, by = c("url" = "queried_url")) %>%
+  inner_join(shared.urls, by = c("url" = "queried_url")) %>%
+  group_by(accuracy) %>%
+  summarize(n())
+```
+
+```{r}
+status.codes <- read.csv(paste0(project.dir, "resources/domains/clean/domain_status_codes.csv")) %>%
+  inner_join(all.domains, on = "url")
+
+label.dist <- status.codes %>%
+  mutate(status = factor(if_else(status_code == 200, "active", "inactive"), levels = c("inactive", "active"))) %>%
+  select(accuracy, transparency, status) %>%
+  pivot_longer(-status, names_to = "label_type", values_to = "label") %>%
+  ggplot() +
+    geom_bar(aes(x = label, fill = status), width = 0.8) + 
+    facet_grid(cols = vars(label_type), scales = "free", space = "free_x") +
+    scale_fill_brewer(palette = "Paired")
+ggsave("label-distributions.pdf", label.dist, device = "pdf", path = paste0(project.dir, "plots/domains"), height = 8, units = "cm")
+label.dist
+```
+
+```{r}
+final.label.dist <- domain.counts %>%
+  select(accuracy, transparency) %>%
+  pivot_longer(everything(), names_to = "label_type", values_to = "label") %>%
+  ggplot() +
+    geom_bar(aes(x = label), fill = "#1f78b4", width = 0.8) +
+    facet_grid(cols = vars(label_type), scales = "free", space = "free_x")
+ggsave("final-label-distributions.pdf", final.label.dist, device = "pdf", path = paste0(project.dir, "plots/domains"), height = 8, units = "cm")
+final.label.dist
+```
+
+```{r}
+entity.dist <- domain.counts %>%
+  select(accuracy, transparency, n_articles, n_posts, n_user) %>%
+  pivot_longer(c(accuracy, transparency), names_to = "label_type", values_to = "label") %>%
+  group_by(label_type, label) %>%
+  summarize(n_articles = sum(n_articles), n_posts = sum(n_posts), n_user = sum(n_user)) %>%
+  pivot_longer(c(n_articles, n_posts, n_user), names_to = "n_var", values_to = "n") %>%
+  ggplot() +
+    geom_col(aes(x = label, y = n, fill = n_var)) +
+    facet_grid(cols = vars(label_type), scales = "free", space = "free_x") +
+    scale_fill_brewer(palette = "Set1") +
+    labs(y = "sum", fill = "Entity")
+ggsave("entity-distributions.pdf", entity.dist, device = "pdf", path = paste0(project.dir, "plots"), height = 8, units = "cm")
+entity.dist
+```
+
+```{r}
+bin.dist <- domain.counts %>%
+  mutate(accuracy_bin = ifelse(as.numeric(accuracy) > 3, "accurate", "inaccurate")) %>%
+  ggplot(aes(x = accuracy_bin)) +
+  ylim(0, 1500) +
+  geom_bar(fill = "#1f78b4") +
+  geom_text(stat = "count", aes(label = ..count..), vjust = -0.5)
+ggsave("accuracy-bin-distribution.pdf", bin.dist, device = "pdf", path = paste0(project.dir, "plots/domains"), width = 8, height = 8, units = "cm")
+bin.dist
+```

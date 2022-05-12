@@ -1,0 +1,21 @@
+{
+    "seed": 19,
+    "label": "accuracy_bin",
+    "oversampling": true,
+    "n_epochs": 3,
+    "batch_size": 16,
+    "loss_fn": "CrossEntropyLoss",
+    "optimizer": {
+        "name": "Adam",
+        "lr": 0.0001
+    },
+    "psm": {
+        "type": "LSTM",
+        "hidden_size": 1000,
+        "output": "mean"
+    },
+    "te": {
+        "type": "mean",
+        "embedding_size": null
+    }
+}
